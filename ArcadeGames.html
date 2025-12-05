@@ -1,0 +1,1366 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arcade Terminal V9.0.1 - Persistence Layer Fixed</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/tone@14.8.49/build/Tone.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        if (firebaseConfig) {
+            window.firebaseApp = initializeApp(firebaseConfig);
+            window.db = getFirestore(window.firebaseApp);
+            window.auth = getAuth(window.firebaseApp);
+            window.appId = appId;
+            window.initialAuthToken = initialAuthToken;
+
+            // EXPORT: Export necessary Firebase functions to the global scope (window)
+            window.signInWithCustomToken = signInWithCustomToken;
+            window.signInAnonymously = signInAnonymously;
+            window.onAuthStateChanged = onAuthStateChanged;
+            window.getDoc = getDoc;
+            window.setDoc = setDoc;
+            window.doc = doc; 
+
+            // Define the data path for user settings
+            window.getUserSettingsDocRef = (userId) => {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/settings`;
+                return window.doc(window.db, collectionPath, 'terminal_settings');
+            };
+
+            // Start the auth process (defined in the main script)
+            window.initFirebaseAndAuth();
+        } else {
+            console.error("Firebase config not found. Persistence disabled.");
+        }
+    </script>
+
+    <style>
+        /*
+        * Default Theme: Fuchsia Terminal (Purple Design)
+        */
+        :root {
+            --terminal-bg: #030712;
+            --terminal-text: #E879F9;
+            --terminal-accent: #C026D3;
+            --terminal-border: #9D174D;
+            --terminal-error: #DC2626;
+            --terminal-success: #10B981;
+            --terminal-info: #FBBF24;
+            /* NEW: Glow shadow for terminal effect */
+            --terminal-glow: 0 0 15px var(--terminal-accent), 0 0 5px var(--terminal-text);
+            --terminal-error-glow: 0 0 10px var(--terminal-error);
+        }
+
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: var(--terminal-bg);
+            color: var(--terminal-text);
+            -webkit-user-select: none;
+            user-select: none;
+            overflow-x: hidden;
+            position: relative;
+            z-index: 10;
+        }
+
+        /* Prevents body scrolling when game/dev drawer is open */
+        .no-scroll {
+            overflow: hidden !important;
+        }
+
+        /* Styling for the Three.js background canvas */
+        #three-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            opacity: 0.3;
+            transition: opacity 0.5s ease-in-out;
+        }
+
+        #three-bg.hidden-bg {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* Main content needs a higher z-index and transparent background */
+        #main-terminal,
+        #dev-console {
+            position: relative;
+            z-index: 10;
+            background-color: transparent;
+        }
+
+        /* Ensure dev-console is truly an overlay by setting z-index high */
+        #dev-console {
+            z-index: 100;
+            position: fixed;
+            inset: 0;
+        }
+
+        .square-corner {
+            border-radius: 0 !important;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--terminal-bg);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--terminal-border);
+            border: 1px solid var(--terminal-text);
+        }
+
+        /* Custom utility classes using CSS variables */
+        .text-main {
+            color: var(--terminal-text);
+        }
+
+        .text-accent {
+            color: var(--terminal-accent);
+        }
+
+        .border-main {
+            border-color: var(--terminal-border);
+        }
+
+        .border-accent {
+            border-color: var(--terminal-accent);
+        }
+
+        /* Mix border color with transparent background for subtle fills */
+        .bg-border-20 {
+            background-color: color-mix(in srgb, var(--terminal-border) 20%, transparent);
+        }
+
+        .bg-border-30 {
+            background-color: color-mix(in srgb, var(--terminal-border) 30%, transparent);
+        }
+
+        /* NEW: Glow class for terminal blocks */
+        .terminal-block {
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+            transition: all 0.3s ease;
+        }
+
+        /* NEW: Glow for interactive elements (buttons, game blocks) */
+        .terminal-interactive:hover {
+            box-shadow: var(--terminal-glow);
+            transform: scale(1.01);
+        }
+
+        /* Improved Developer Pulse with Error Glow */
+        .developer-mode-active {
+            animation: pulse-border 0.8s infinite alternate;
+            border-color: var(--terminal-error);
+            box-shadow: var(--terminal-error-glow);
+        }
+
+        @keyframes pulse-border {
+            from {
+                border-color: var(--terminal-border);
+            }
+
+            to {
+                border-color: var(--terminal-error);
+            }
+        }
+
+        #game-drawer {
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: translateY(100%);
+            opacity: 0;
+            pointer-events: none;
+            transition: transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.6s;
+            background-color: var(--terminal-bg);
+            position: fixed;
+            z-index: 40;
+            display: flex;
+            flex-direction: column;
+            border-color: var(--terminal-border);
+        }
+
+        /* Style when drawer is in fullscreen mode (for iframe wrapper) */
+        #game-drawer:fullscreen #iframe-wrapper,
+        #game-drawer:-webkit-full-screen #iframe-wrapper,
+        #game-drawer:-moz-full-screen #iframe-wrapper,
+        #game-drawer:-ms-full-screen #iframe-wrapper {
+            /* The wrapper should take up the whole screen inside fullscreen mode */
+            height: 100vh;
+            width: 100vw;
+            margin: 0;
+            padding: 0;
+        }
+
+        #game-drawer.active {
+            transform: translateY(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        /* Better cursor: solid block */
+        .cursor::after {
+            content: '\2588';
+            animation: blink 0.7s step-end infinite;
+        }
+
+        @keyframes blink {
+            from,
+            to {
+                color: transparent;
+            }
+
+            50% {
+                color: var(--terminal-text);
+            }
+        }
+
+        #game-iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+        }
+
+        #iframe-wrapper {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: flex-start;
+            overflow-y: auto;
+        }
+
+        /* NEW: Boot Sequence Styling */
+        #boot-sequence {
+            position: fixed;
+            inset: 0;
+            background-color: var(--terminal-bg);
+            color: var(--terminal-text);
+            z-index: 150;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.2rem;
+            animation: boot-fade 0.5s;
+        }
+
+        #boot-sequence.hidden {
+            display: none;
+        }
+
+        /* Mute/Unmute SVG Icon Styles */
+        .mute-btn-svg {
+            cursor: pointer;
+            transition: color 0.3s, opacity 0.3s;
+        }
+        .mute-btn-svg:hover {
+            opacity: 0.8;
+            box-shadow: 0 0 5px var(--terminal-accent);
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+
+<body class="min-h-screen p-4 md:p-8 square-corner">
+
+    <div id="boot-sequence">
+        <div class="text-center">
+            <h1 class="text-3xl font-bold mb-6 text-accent">ARCADE_TERMINAL_V9.0.1</h1>
+            <div id="boot-output" class="text-left max-w-md mx-auto h-48 overflow-hidden"></div>
+        </div>
+    </div>
+
+    <canvas id="three-bg"></canvas>
+
+    <div id="dev-console" class="fixed inset-0 bg-black bg-opacity-90 z-50 p-8 hidden square-corner overflow-y-auto">
+        <div class="max-w-4xl mx-auto border-2 border-main p-6 square-corner terminal-block"
+            style="border-color: var(--terminal-error);">
+            <h2 class="text-2xl mb-4 square-corner" style="color: var(--terminal-error);">>>> DEVELOPER MODE: ACTIVE <<<
+            </h2>
+            <p class="mb-6" style="color: var(--terminal-text);">
+                Welcome, Operator. Access level: 7. Exit by ESC or typing 'developer' again.
+            </p>
+            <div id="dev-auth-status" class="mb-4 p-3 bg-border-30 text-xs text-main overflow-x-auto terminal-block">
+                Firebase status initializing...
+            </div>
+            <div class="space-y-3">
+                <button onclick="devViewConsole(); playClick()"
+                    class="dev-btn border-2 px-4 py-2 hover:bg-red-900 transition square-corner w-full text-left terminal-interactive"
+                    style="border-color: var(--terminal-error); color: var(--terminal-error);">
+                    [CMD] View System Console Log
+                </button>
+                <button onclick="devShowAuthKey(); playClick()"
+                    class="dev-btn border-2 px-4 py-2 hover:bg-red-900 transition square-corner w-full text-left terminal-interactive"
+                    style="border-color: var(--terminal-error); color: var(--terminal-error);">
+                    [INFO] Display Current Authentication Status
+                </button>
+                <div id="dev-output"
+                    class="mt-4 p-3 min-h-[50px] overflow-auto square-corner text-main bg-border-30 terminal-block">
+                    System output will appear here.
+                </div>
+            </div>
+            <button onclick="toggleDevConsole(); playClick()"
+                class="mt-8 bg-red-800 text-white px-4 py-2 hover:bg-red-600 transition square-corner"
+                style="background-color: var(--terminal-error);">
+                [EXIT] Close Developer Console
+            </button>
+        </div>
+    </div>
+
+    <div id="main-terminal" class="max-w-6xl mx-auto square-corner">
+
+        <div id="status-bar"
+            class="flex justify-between items-center pb-2 mb-4 border-b-2 border-main terminal-block">
+            <h1 class="text-3xl font-bold square-corner text-accent">
+                SYSTEM_ARCADE_V9.0.1
+                <span id="dev-indicator"
+                    class="ml-2 text-sm hidden border px-1 py-0.5 developer-mode-active text-error"
+                    style="color: var(--terminal-error);">DEV_ACTIVE</span>
+            </h1>
+            <div class="flex items-center space-x-4">
+                <button onclick="toggleSound(); playClick()" id="mute-btn"
+                    class="p-1 rounded-sm terminal-interactive">
+                    <svg id="volume-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mute-btn-svg"
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"
+                        style="color: var(--terminal-text);">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M15.536 8.464a5 5 0 010 7.072m2.828-9.899a9 9 0 010 12.728M5.793 11.207A2 2 0 016 11.5v1a2 2 0 01-.207.293l-1.5 1.5A.5.5 0 013 14.5v-5a.5.5 0 01.293-.45l1.5 1.5zM12 4.5v15" />
+                    </svg>
+                    <svg id="mute-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mute-btn-svg hidden"
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"
+                        style="color: var(--terminal-text);">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M6 18L18 6M6 6l12 12M15.536 8.464a5 5 0 010 7.072m2.828-9.899a9 9 0 010 12.728M5.793 11.207A2 2 0 016 11.5v1a2 2 0 01-.207.293l-1.5 1.5A.5.5 0 013 14.5v-5a.5.5 0 01.293-.45l1.5 1.5zM12 4.5v15" />
+                    </svg>
+                </button>
+
+                <span id="status-time" class="text-sm text-info mr-4"></span>
+
+                <button id="system-settings-btn" onclick="openSettings(); playClick()"
+                    class="text-xs text-info hover:opacity-80 transition square-corner px-2 py-1 border hidden terminal-interactive"
+                    style="color: var(--terminal-info); border-color: var(--terminal-info);">
+                    [SETTINGS]
+                </button>
+                <span id="status-text" class="text-sm" style="color: var(--terminal-error);">[STATUS:
+                    ACCESS_DENIED]</span>
+            </div>
+        </div>
+
+        <div id="auth-area" class="mb-6">
+            <p class="text-main mb-2">
+                AUTH_PROMPT: Enter authorization code.
+            </p>
+            <div class="flex items-center">
+                <span class="text-accent">$ > </span>
+                <input type="password" id="auth-input" placeholder="ACCESS_CODE | COMMAND"
+                    class="flex-grow bg-transparent border-b border-main outline-none text-main ml-2 p-1 square-corner"
+                    autofocus>
+                <span class="cursor"></span>
+            </div>
+            <p id="auth-message" class="mt-2 hidden text-sm" style="color: var(--terminal-error);">
+                AUTHORIZATION FAILURE: Incorrect code. Attempt logged.
+            </p>
+        </div>
+
+        <div id="games-area" class="mt-8 square-corner hidden">
+
+            <div id="welcome-message"
+                class="mb-6 p-4 border border-main bg-border-20 hidden square-corner terminal-block">
+                <p class="text-xl font-bold text-accent">>> ACCESS GRANTED: WELCOME, OPERATOR V9.0.1
+                    <<</p>
+                <p class="text-sm text-main mt-1">LAST_LOGIN: <span id="last-login" class="text-info">N/A</span></p>
+                <p id="search-stats" class="text-sm text-info mt-2">SYSTEM_REPORT: 0 modules found in directory.</p>
+                <p class="text-sm text-main mt-1">Directory module online. Use the search filter to locate a
+                    program quickly.</p>
+            </div>
+
+            <h2 class="text-2xl mb-4 text-main border-b border-main pb-2">>>> DIRECTORY_MODULES</h2>
+
+            <div
+                class="mb-6 flex items-center border border-main bg-border-30 square-corner terminal-block">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 ml-3" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor" stroke-width="2" style="color: var(--terminal-text);">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input type="text" id="game-search-input"
+                    placeholder="SEARCH DIRECTORY (e.g., 'Portal', 'Doom', 'FNF')..."
+                    class="flex-grow bg-transparent border-none outline-none text-main p-3 square-corner"
+                    oninput="filterGames()">
+            </div>
+
+            <div id="game-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+        </div>
+    </div>
+
+    <div id="game-drawer" class="border-t-4 p-0 overflow-hidden square-corner border-main">
+        <div id="drawer-header" class="flex justify-between items-center p-4 border-b border-main"
+            style="background-color: var(--terminal-bg);">
+            <h2 id="drawer-title" class="text-3xl font-bold text-main">LOADING...</h2>
+            <div class="flex space-x-2">
+                <button onclick="toggleFullscreen(); playClick();"
+                    class="text-lg hover:opacity-80 transition square-corner px-3 py-1 border-2 text-accent hidden terminal-interactive"
+                    style="color: var(--terminal-accent); border-color: var(--terminal-accent);"
+                    id="fullscreen-btn">
+                    [FULLSCREEN]
+                </button>
+                <button onclick="refreshGame(); playTransition();"
+                    class="text-lg hover:opacity-80 transition square-corner px-3 py-1 border-2 text-info hidden terminal-interactive"
+                    style="color: var(--terminal-info); border-color: var(--terminal-info);"
+                    id="refresh-btn">
+                    [REFRESH]
+                </button>
+                <button onclick="closeDrawer(); playTransition();"
+                    class="text-lg hover:opacity-80 transition square-corner px-3 py-1 border-2 terminal-interactive"
+                    style="color: var(--terminal-error); border-color: var(--terminal-error);">
+                    [EXIT]
+                </button>
+            </div>
+        </div>
+        <div id="iframe-wrapper" class="flex-grow">
+            <p id="load-status" class="p-4 text-main">System initializing... Please wait.</p>
+        </div>
+    </div>
+
+    <script>
+        // -----------------------
+        // STATE VARIABLES
+        // -----------------------
+        let isAccessGranted = false; 
+        let isAuthReady = false; 
+        let currentUserId = null; 
+        let isDrawerOpen = false;
+        let currentGameIndex = null;
+        let devKeySequence = '';
+        let isTransitionPlaying = false;
+        let isSoundEnabled = true;
+        let isBackgroundEnabled = true; // Not fully implemented in HTML/CSS but kept for state
+        let isSecretThemeUnlocked = false;
+        let currentThemeIndex = 0;
+        let lastLoginTime = 'N/A';
+        let isHackerModeActive = false;
+
+        const AUTH_CODE = "OmegaProtocol";
+        const DEV_CODE = "developer";
+        const HACKER_CODE = "override";
+        const UNLOCK_CODE = "CYBERDECK";
+        const FIREBASE_SETTINGS_PATH = 'terminal_settings'; 
+
+        // Theme Definitions (Index 0 is the required Purple Design / Fuchsia Terminal)
+        const THEMES = [
+            { name: 'Fuchsia Terminal (Default)', bg: '#030712', text: '#E879F9', border: '#9D174D', accent: '#C026D3', error: '#DC2626', info: '#FBBF24' },
+            { name: 'Matrix Green', bg: '#0A0A0A', text: '#00FF41', border: '#00B333', accent: '#009933', error: '#FF0000', info: '#FFFF00' },
+            { name: 'Ocean Blue', bg: '#0E1D2D', text: '#4ADFFF', border: '#1A5F7A', accent: '#1E90FF', error: '#FF6347', info: '#FFA07A' },
+            { name: 'Amber Glow', bg: '#1C1C1C', text: '#FFBF00', border: '#CC9900', accent: '#FFA500', error: '#FF4500', info: '#00FFFF' },
+            { name: 'Red Alert', bg: '#000000', text: '#FF0000', border: '#FF5733', accent: '#DC2626', error: '#FFD700', info: '#F08080' },
+            { name: '[LOCKED] Cyberdeck Override', bg: '#0D012B', text: '#4ADFFF', border: '#8A2BE2', accent: '#00FFFF', error: '#FF00FF', info: '#FFFF00', isSecret: true }
+        ];
+
+        // -----------------------
+        // FULL GAME DATA ARRAY
+        // (Includes all games you listed and the structure from your original prompt)
+        // -----------------------
+        const GAME_DATA = [
+            // --- POPULAR GAMES ---
+            {
+                name: "Plants Vs Zombies 2",
+                description: "Defend your lawn with crazy plants against fun-loving zombies across time",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/197.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/92.html"
+            },
+            {
+                name: "Hotline Miami",
+                description: "Fast-paced top-down action combat",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/22.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/16.html"
+            },
+            {
+                name: "Balatro",
+                description: "Build insane poker hands with special Joker cards",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/195.jpg",
+                iframeSrc: "https://thirstygithub.github.io/cool-math/"
+            },
+            // --- ALL GAMES ---
+            {
+                name: "Daggerfall",
+                description: "Classic Elder Scrolls RPG with massive open world and deep character customization",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/252.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/136.html"
+            },
+            {
+                name: "Portal",
+                description: "Mind-bending puzzle game with portal gun mechanics and dark humor",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/253.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/135.html"
+            },
+            {
+                name: "Ice Dodo",
+                description: "3D obstacle course game with simple controls but complex challenging maps",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/254.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/134.html"
+            },
+            {
+                name: "Doom",
+                description: "The original FPS that revolutionized gaming with fast-paced demon slaying action",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/255.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/133.html"
+            },
+            {
+                name: "Doom 2",
+                description: "Sequel to the iconic FPS with new weapons, enemies, and hellish levels",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/257.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/131.html"
+            },
+            {
+                name: "Call of Duty: World at War",
+                description: "Intense DS version of the WWII FPS",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/258.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/130.html"
+            },
+            {
+                name: "Call of Duty 4: Modern Warfare",
+                description: "DS Version of the modern military shooter",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/259.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/129.html"
+            },
+            {
+                name: "Kart Bros",
+                description: "Free online kart racing game with wild antics, power-ups, and multiplayer action",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/260.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/128.html"
+            },
+            {
+                name: "Peggle",
+                description: "Addictive physics puzzle game where you shoot balls to clear orange pegs with satisfying challenges",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/251.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/127.html"
+            },
+            {
+                name: "Ace Attorny",
+                description: "Courtroom drama adventure where you investigate crimes and defend clients with evidence and logic",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/250.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/126.html"
+            },
+            {
+                name: "FNF Agoti",
+                description: "Friday Night Funkin' mod featuring the popular OC character Agoti with original tracks",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/249.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/125.html"
+            },
+            {
+                name: "FNF Black Betrayal",
+                description: "FNF mod based on the Among Us mod with the black imposter going crazy",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/248.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/124.html"
+            },
+            {
+                name: "FNF B-Side",
+                description: "FNF mod featuring remixed B-side versions of original tracks with new visuals",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/247.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/123.html"
+            },
+            {
+                name: "FNF Camellia",
+                description: "Challenging FNF mod featuring high-BPM tracks from artist Camellia",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/246.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/122.html"
+            },
+            {
+                name: "FNF Impostor V4",
+                description: "Among Us themed FNF mod with sus rhythms and impostor gameplay",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/245.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/121.html"
+            },
+            {
+                name: "FNF Indie Cross",
+                description: "Crossover FNF mod featuring characters from popular indie games",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/244.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/120.html"
+            },
+            {
+                name: "FNF Kapi",
+                description: "FNF mod featuring the arcade-loving cat character Kapi with arcade-style tracks",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/243.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/119.html"
+            },
+            {
+                name: "FNF Mario Madness",
+                description: "Mario-themed FNF mod with madness-induced versions of classic characters",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/242.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/118.html"
+            },
+            {
+                name: "FNF Pibby Apocalypse",
+                description: "FNF mod based on the Pibby corruption concept with glitch-themed horror",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/241.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/117.html"
+            },
+            {
+                name: "FNF Shaggy X Matt",
+                description: "FNF crossover mod featuring Shaggy and Matt from Wii Sports in musical battles",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/240.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/116.html"
+            },
+            {
+                name: "FNF Sonic.exe",
+                description: "Horror-themed FNF mod based on the Sonic.exe creepypasta with intense rhythms",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/239.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/115.html"
+            },
+            {
+                name: "FNF Garcello",
+                description: "Emotional FNF mod featuring the character Garcello with soulful tracks",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/238.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/114.html"
+            },
+            {
+                name: "FNF Hit Single",
+                description: "FNF mod with that blue singing guy that everyone likes",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/237.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/113.html"
+            },
+            {
+                name: "Achillies 2",
+                description: "Sequel to the action-packed Achillies game with enhanced combat and story",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/236.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/112.html"
+            },
+            {
+                name: "Russian Counter Strike",
+                description: "Counter-Strike inspired tactical shooter with Russian military themes",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/235.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/111.html"
+            },
+            {
+                name: "Deltarune",
+                description: "RPG from Undertale creator featuring Kris and Susie in a dark world adventure",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/234.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/110.html"
+            },
+            {
+                name: "Learn to Fly 3",
+                description: "Physics-based game where you help a penguin achieve flight through various methods",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/233.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/109.html"
+            },
+            {
+                name: "Lego Batman 2",
+                description: "LEGO action-adventure featuring Batman and DC superheroes in Gotham City",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/232.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/108.html"
+            },
+            {
+                name: "Lego Starwars Complete Saga",
+                description: "Complete LEGO Star Wars experience covering all six episodes with humor and action",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/231.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/107.html"
+            },
+            {
+                name: "Madness Interactive",
+                description: "Fast-paced stick figure combat game with intense action and ragdoll physics",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/230.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/106.html"
+            },
+            {
+                name: "Tony Hawks Pro Skater",
+                description: "Classic skateboarding game with trick combos, iconic skaters, and great soundtrack",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/229.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/105.html"
+            },
+            {
+                name: "Postal",
+                description: "Controversial top-down shooter known for its dark humor and violent gameplay",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/228.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/104.html"
+            },
+            {
+                name: "Resident Evil 3",
+                description: "Survival horror game featuring Jill Valentine escaping Nemesis in Raccoon City",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/227.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/103.html"
+            },
+            {
+                name: "Scribblenauts",
+                description: "Puzzle game where you solve challenges by summoning objects you write",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/226.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/102.html"
+            },
+            {
+                name: "Sprunki",
+                description: "Basically a copy of Incredibox but with little furry creatures",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/225.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/101.html"
+            },
+            {
+                name: "Strange Rope Police",
+                description: "Physics-based game with rope mechanics and law enforcement themes",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/224.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/100.html"
+            },
+            {
+                name: "Street Fighter III",
+                description: "Classic fighting game known for parry system and competitive gameplay",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/223.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/99.html"
+            },
+            {
+                name: "Super Liquid Soccer",
+                description: "Arcade soccer game with fluid physics and exaggerated gameplay mechanics",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/222.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/98.html"
+            },
+            {
+                name: "Tempoverdose",
+                description: "Rhythm game with intense tempo-based challenges and electronic music",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/221.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/97.html"
+            },
+            {
+                name: "Abandoned",
+                description: "Escape room type game where you need to figure out how to get out of each",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/220.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/96.html"
+            },
+            {
+                name: "Wolfenstein 3D",
+                description: "The pioneer FPS game where you battle Nazis as Allied spy B.J. Blazkowicz",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/219.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/95.html"
+            },
+            {
+                name: "Zombotron Reboot",
+                description: "Action-packed platform shooter with physics-based combat in zombie-infested world",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/218.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/94.html"
+            },
+            {
+                name: "Mortal Kombat 4",
+                description: "Classic fighting game with brutal fatalities and iconic characters in fourth installment",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/fuckthis.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/93.html"
+            },
+            {
+                name: "Undertale",
+                description: "An RPG where you play as a human child who falls into an underground world of monsters, with the goal of getting back to the surface",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/217.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/91.html"
+            },
+            {
+                name: "The Legend of Zelda Majora's Mask",
+                description: "A dark adventure through a doomed world where you have only 3 days to prevent the moon from crashing",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/216.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/90.html"
+            },
+            {
+                name: "Cooking Mama 3",
+                description: "Cook delicious meals with Mama's guidance in this interactive culinary adventure",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/215.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/89.html"
+            },
+            {
+            	name: "Retro Bowl",
+                description: "a mobile football video game with a retro, arcade-style presentation that combines simple-to-learn, yet deep, gameplay with a franchise-management mode",
+                image: "https://cdn.jsdelivr.net/gh/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/images/7.jpg",
+                iframeSrc: "https://raw.githack.com/NoahsAmazingTutoringHelp/Noahs-Calculus-Tutor/master/games/4.html"
+            },
+            
+        ];
+
+
+        // -----------------------
+        // DOM ELEMENTS
+        // -----------------------
+        const authInput = document.getElementById('auth-input');
+        const authMessage = document.getElementById('auth-message');
+        const gamesArea = document.getElementById('games-area');
+        const gameListContainer = document.getElementById('game-list');
+        const statusBar = document.getElementById('status-text');
+        const gameDrawer = document.getElementById('game-drawer');
+        const drawerTitle = document.getElementById('drawer-title');
+        const iframeWrapper = document.getElementById('iframe-wrapper');
+        const devConsole = document.getElementById('dev-console');
+        const devIndicator = document.getElementById('dev-indicator');
+        const devOutput = document.getElementById('dev-output');
+        const welcomeMessage = document.getElementById('welcome-message');
+        const gameSearchInput = document.getElementById('game-search-input');
+        const settingsButton = document.getElementById('system-settings-btn');
+        const refreshButton = document.getElementById('refresh-btn');
+        const fullscreenButton = document.getElementById('fullscreen-btn'); 
+        const muteButton = document.getElementById('mute-btn'); 
+        const volumeIcon = document.getElementById('volume-icon'); 
+        const muteIcon = document.getElementById('mute-icon'); 
+        const threeBg = document.getElementById('three-bg');
+        const statusTime = document.getElementById('status-time');
+        const lastLoginSpan = document.getElementById('last-login');
+        const mainTerminal = document.getElementById('main-terminal');
+        const bootSequenceDiv = document.getElementById('boot-sequence');
+        const devAuthStatus = document.getElementById('dev-auth-status');
+
+        // Apply events to input fields
+        if (authInput) {
+            authInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') checkAuth();
+            });
+        }
+        
+        // -----------------------
+        // TONE.JS SOUND FUNCTIONS
+        // -----------------------
+        let clickSynth;
+        let transitionSynth;
+        let droneSynth;
+
+        function initSound() {
+            if (typeof Tone === 'undefined') {
+                isSoundEnabled = false;
+                return;
+            }
+
+            clickSynth = new Tone.MembraneSynth({
+                pitchDecay: 0.05,
+                octaves: 10,
+                envelope: { attack: 0.001, decay: 0.2, sustain: 0.01, release: 0.1 },
+                volume: -10 
+            }).toDestination();
+
+            transitionSynth = new Tone.Synth({
+                oscillator: { type: "sine" },
+                envelope: { attack: 0.05, decay: 0.5, sustain: 0.0, release: 0.5 },
+                volume: -12
+            }).toDestination();
+            
+            droneSynth = new Tone.FMSynth({
+                harmonicity: 0.5,
+                modulationIndex: 10,
+                oscillator: { type: 'sine' },
+                envelope: { attack: 2, decay: 0.1, sustain: 1, release: 2 },
+                volume: -24 
+            }).toDestination();
+
+            new Tone.Loop(time => {
+                if (isSoundEnabled) {
+                     droneSynth.triggerAttackRelease("C2", "4n", time);
+                }
+            }, "2n").start(0); 
+
+            Tone.Transport.start();
+            
+            isSoundEnabled = localStorage.getItem('isSoundEnabled') !== 'false';
+            updateMuteButtonUI(); 
+        }
+
+        function playClick() {
+            if (isSoundEnabled && clickSynth) {
+                clickSynth.triggerAttackRelease("C5", "8n");
+            }
+        }
+
+        function playTransition() {
+            if (isSoundEnabled && transitionSynth) {
+                transitionSynth.triggerAttackRelease("G4", "0.2s", Tone.now());
+                transitionSynth.triggerAttackRelease("C4", "0.3s", Tone.now() + 0.2);
+            }
+        }
+
+        function toggleSound() {
+            playClick(); // Play click before muting/unmuting the main drone
+            isSoundEnabled = !isSoundEnabled;
+            localStorage.setItem('isSoundEnabled', isSoundEnabled);
+            updateMuteButtonUI();
+
+            if (isSoundEnabled) {
+                if (Tone.context.state !== 'running') {
+                    Tone.start();
+                }
+            }
+        }
+
+        function updateMuteButtonUI() {
+            if (volumeIcon && muteIcon) {
+                if (isSoundEnabled) {
+                    volumeIcon.classList.remove('hidden');
+                    muteIcon.classList.add('hidden');
+                } else {
+                    volumeIcon.classList.add('hidden');
+                    muteIcon.classList.remove('hidden');
+                }
+            }
+        }
+
+
+        // -----------------------
+        // GAME & DRAWER FUNCTIONS
+        // -----------------------
+        
+        /**
+         * Renders the game list based on the GAME_DATA array, applying filters if provided.
+         */
+        function displayGames(gamesToDisplay = GAME_DATA) {
+            const container = document.getElementById('game-list');
+            if (!container) return;
+
+            container.innerHTML = '';
+            
+            const searchStats = document.getElementById('search-stats');
+            if (searchStats) {
+                searchStats.textContent = `SYSTEM_REPORT: ${gamesToDisplay.length} modules found in directory.`;
+            }
+
+            if (gamesToDisplay.length === 0) {
+                container.innerHTML = `
+                    <div class="col-span-full p-6 text-center border-2 border-main terminal-block">
+                        <p class="text-xl text-error">>>> SEARCH FAILURE: NO MATCHING MODULES FOUND <<<</p>
+                        <p class="text-sm text-main mt-2">Check spelling or try a broader command.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            gamesToDisplay.forEach((game, index) => {
+                // Find the original index for launching, crucial for filtered lists
+                const originalIndex = GAME_DATA.indexOf(game); 
+
+                const card = document.createElement('div');
+                card.className = 'p-4 border-2 border-main square-corner terminal-block terminal-interactive cursor-pointer bg-border-20';
+                
+                card.onclick = () => openGame(originalIndex); 
+
+                const imageUrl = game.image || 'https://placehold.co/80x80/030712/E879F9?text=GAME';
+                const command = game.name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_{2,}/g, '_');
+
+                card.innerHTML = `
+                    <div class="flex items-start space-x-4">
+                        <img src="${imageUrl}" alt="${game.name}" class="w-16 h-16 object-cover square-corner border border-accent">
+                        <div class="flex-grow">
+                            <h3 class="text-xl font-bold text-accent">${game.name}</h3>
+                            <p class="text-sm text-main mt-1">${game.description}</p>
+                            <span class="text-xs text-info mt-2 block">[LAUNCH: ${command}]</span>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        /**
+         * Filters the GAME_DATA array based on the input field value and re-renders the list.
+         */
+        function filterGames() {
+            const input = document.getElementById('game-search-input');
+            const query = input.value.toLowerCase();
+
+            const filtered = GAME_DATA.filter(game => 
+                game.name.toLowerCase().includes(query) || 
+                game.description.toLowerCase().includes(query)
+            );
+            
+            displayGames(filtered);
+        }
+        
+        /**
+         * Opens the game drawer and loads the selected game.
+         */
+        function openGame(index) {
+            if (!isAccessGranted) return;
+            playClick();
+            playTransition(); // Added transition sound here
+
+            const game = GAME_DATA[index];
+            if (!game) return;
+
+            currentGameIndex = index;
+            isDrawerOpen = true;
+            
+            refreshButton.classList.remove('hidden');
+            fullscreenButton.classList.remove('hidden');
+            
+            document.body.classList.add('no-scroll');
+            gameDrawer.classList.add('active');
+            drawerTitle.textContent = `EXEC: ${game.name}`;
+
+            iframeWrapper.innerHTML = `<p id="load-status" class="p-4 text-main">SYSTEM: Initializing module "${game.name}"...</p>`;
+
+            if (game.iframeSrc) {
+                // External IFRAME game
+                const iframe = document.createElement('iframe');
+                iframe.id = 'game-iframe';
+                iframe.src = game.iframeSrc;
+                iframe.allowFullscreen = true;
+                
+                iframe.onload = () => {
+                    const status = document.getElementById('load-status');
+                    if(status) status.remove();
+                };
+
+                iframeWrapper.appendChild(iframe);
+
+            } else if (game.gameCode && typeof game.gameCode === 'function') {
+                // Internal Console/JS game (or Settings/Dev content)
+                iframeWrapper.innerHTML = `<div id="console-game-area" class="w-full h-full p-4 overflow-y-auto"></div>`;
+                const consoleArea = document.getElementById('console-game-area');
+                game.gameCode(consoleArea);
+                
+                refreshButton.classList.add('hidden');
+                fullscreenButton.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Refreshes the currently loaded game iframe.
+         */
+        function refreshGame() {
+            const iframe = document.getElementById('game-iframe');
+            if (iframe) {
+                iframe.src = iframe.src; 
+            }
+        }
+
+        /**
+         * Toggles fullscreen mode for the game drawer.
+         */
+        function toggleFullscreen() {
+            playClick();
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                gameDrawer.requestFullscreen();
+            }
+        }
+
+        /**
+         * Closes the game drawer.
+         */
+        function closeDrawer() {
+            playTransition();
+            isDrawerOpen = false;
+            document.body.classList.remove('no-scroll');
+            gameDrawer.classList.remove('active');
+            
+            // Clear iframe content
+            iframeWrapper.innerHTML = '<p id="load-status" class="p-4 text-main">System initialized and ready.</p>';
+            currentGameIndex = null;
+            
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            }
+            
+            // Ensure buttons are hidden for next launch if not a game
+            refreshButton.classList.add('hidden');
+            fullscreenButton.classList.add('hidden');
+        }
+
+        // -----------------------
+        // AUTH, THEME, & PERSISTENCE (Existing Logic)
+        // -----------------------
+        
+        // This is a placeholder for the Firebase logic initiated by the 'module' script above.
+        window.initFirebaseAndAuth = async function() {
+            await new Promise(resolve => window.addEventListener('load', resolve));
+            const { auth, initialAuthToken } = window;
+            if (!auth) return;
+
+            try {
+                if (initialAuthToken) {
+                    await window.signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await window.signInAnonymously(auth);
+                }
+            } catch (error) {
+                devAuthStatus.textContent = `FIREBASE AUTH ERROR: ${error.message}`;
+            }
+
+            window.onAuthStateChanged(auth, (user) => { 
+                if (user) {
+                    currentUserId = user.uid;
+                    isAuthReady = true;
+                    devAuthStatus.textContent = `[USER_ID: ${currentUserId}] | STATUS: AUTHENTICATED`;
+                    loadUserSettings();
+                } else {
+                    currentUserId = null;
+                    isAuthReady = true;
+                    devAuthStatus.textContent = "[USER_ID: ANONYMOUS] | STATUS: NOT_AUTHENTICATED";
+                }
+            });
+        }
+        
+        async function loadUserSettings() {
+            if (!currentUserId || !window.db || !window.getDoc) return; 
+
+            try {
+                const docRef = window.getUserSettingsDocRef(currentUserId);
+                const docSnap = await window.getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    
+                    isSecretThemeUnlocked = data.isSecretThemeUnlocked || false;
+                    currentThemeIndex = data.selectedThemeIndex !== undefined ? data.selectedThemeIndex : 0;
+                    lastLoginTime = data.lastLoginTime || 'N/A';
+
+                    applyTheme(currentThemeIndex);
+                    if (lastLoginSpan) lastLoginSpan.textContent = lastLoginTime;
+                }
+            } catch (error) {
+                console.error("Error loading user settings:", error);
+            }
+        }
+
+        async function saveUserSettings() {
+            if (!currentUserId || !window.db || !window.setDoc) return;
+            try {
+                const docRef = window.getUserSettingsDocRef(currentUserId);
+                const settings = {
+                    isSecretThemeUnlocked: isSecretThemeUnlocked,
+                    selectedThemeIndex: currentThemeIndex,
+                    lastLoginTime: new Date().toLocaleString(),
+                    isHackerModeActive: isHackerModeActive
+                };
+                await window.setDoc(docRef, settings, { merge: true });
+                console.log("Settings saved successfully.");
+            } catch (error) {
+                console.error("Error saving user settings:", error);
+            }
+        }
+
+        function applyTheme(index) {
+            let theme = THEMES[index];
+            if (theme.isSecret && !isSecretThemeUnlocked) {
+                // If trying to apply a locked theme, revert to default
+                theme = THEMES[0];
+                currentThemeIndex = 0;
+                // console.warn("Attempted to apply locked theme. Reverting to default.");
+            } else {
+                currentThemeIndex = index;
+            }
+            
+            const root = document.documentElement;
+            root.style.setProperty('--terminal-bg', theme.bg);
+            root.style.setProperty('--terminal-text', theme.text);
+            root.style.setProperty('--terminal-accent', theme.accent);
+            root.style.setProperty('--terminal-border', theme.border);
+            root.style.setProperty('--terminal-error', theme.error);
+            root.style.setProperty('--terminal-success', theme.success);
+            root.style.setProperty('--terminal-info', theme.info);
+            
+            // Re-calculate glow based on new accent color
+            root.style.setProperty('--terminal-glow', `0 0 15px ${theme.accent}, 0 0 5px ${theme.text}`);
+            
+            // Save the newly applied theme index
+            if(isAccessGranted) saveUserSettings();
+        }
+        
+        function checkAuth() {
+            playClick();
+            const input = authInput.value.trim();
+            authInput.value = ''; // Clear input immediately
+            authMessage.classList.add('hidden');
+
+            if (input === AUTH_CODE) {
+                if (isAccessGranted) return; // Already logged in
+                
+                isAccessGranted = true;
+                statusBar.textContent = "[STATUS: ONLINE_OPERATOR]";
+                statusBar.style.color = 'var(--terminal-success)';
+                
+                document.getElementById('auth-area').classList.add('hidden');
+                gamesArea.classList.remove('hidden');
+                welcomeMessage.classList.remove('hidden');
+
+                // CRUCIAL: Load and display all games
+                displayGames(); 
+                
+                // Update last login and save settings
+                const now = new Date().toLocaleString();
+                lastLoginSpan.textContent = now;
+                saveUserSettings(); 
+                
+            } else if (input === DEV_CODE) {
+                toggleDevConsole();
+            } else if (input === HACKER_CODE) {
+                isHackerModeActive = !isHackerModeActive;
+                alert(`Hacker Mode ${isHackerModeActive ? 'Activated' : 'Deactivated'}.`);
+            } else if (input === UNLOCK_CODE) {
+                isSecretThemeUnlocked = true;
+                alert("SECRET THEME UNLOCKED: CYBERDECK. Check settings.");
+                saveUserSettings();
+            } else if (input.length > 0) {
+                authMessage.textContent = "AUTHORIZATION FAILURE: Incorrect code. Attempt logged.";
+                authMessage.style.color = 'var(--terminal-error)';
+                authMessage.classList.remove('hidden');
+                statusBar.textContent = "[STATUS: LOGIN_FAILURE]";
+                statusBar.style.color = 'var(--terminal-error)';
+            }
+        }
+        
+        // Developer Console Functions (Simplified for brevity)
+        function toggleDevConsole() {
+            playClick();
+            if (devConsole.classList.contains('hidden')) {
+                devConsole.classList.remove('hidden');
+                devIndicator.classList.remove('hidden');
+            } else {
+                devConsole.classList.add('hidden');
+                devIndicator.classList.add('hidden');
+            }
+        }
+
+        function devViewConsole() {
+            devOutput.textContent = ">>> Displaying browser console logs. Check F12.";
+            console.log("--- Developer Console View Triggered ---");
+        }
+        
+        function devShowAuthKey() {
+            devOutput.textContent = `AUTH_CODE: ${AUTH_CODE}\nDEV_CODE: ${DEV_CODE}\nUNLOCK_CODE: ${UNLOCK_CODE}`;
+        }
+        
+        // Placeholder for openSettings - opens the drawer for configuration
+        function openSettings() {
+             // Example function structure for openSettings
+             const settingsHTML = `
+                <div class="p-8 space-y-6 text-main">
+                    <h3 class="text-3xl font-bold text-accent">SYSTEM CONFIGURATION</h3>
+                    <div class="p-4 border border-main bg-border-30 terminal-block">
+                        <h4 class="text-xl mb-3">THEME SELECTION</h4>
+                        <div id="theme-options" class="grid grid-cols-2 gap-3">
+                            ${THEMES.map((theme, index) => `
+                                <button onclick="applyTheme(${index}); playClick()" 
+                                        class="p-2 border-2 ${currentThemeIndex === index ? 'border-accent' : 'border-main'} 
+                                        hover:border-accent transition square-corner terminal-interactive text-left"
+                                        ${theme.isSecret && !isSecretThemeUnlocked ? 'disabled' : ''}>
+                                    ${theme.isSecret && !isSecretThemeUnlocked ? '[LOCKED]' : theme.name}
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Reuse openGame logic with a settings object structure
+            openGame(GAME_DATA.length); // Use a non-existent index or define a dedicated settings entry
+
+            drawerTitle.textContent = "CONFIG: SYSTEM_SETTINGS";
+            iframeWrapper.innerHTML = settingsHTML;
+
+            // Hide buttons not needed for settings
+            refreshButton.classList.add('hidden');
+            fullscreenButton.classList.add('hidden');
+        }
+
+
+        // -----------------------
+        // INITIALIZATION
+        // -----------------------
+
+        // Clock display update
+        function updateClock() {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            statusTime.textContent = timeString;
+        }
+
+        function runBootSequence() {
+            const output = document.getElementById('boot-output');
+            const lines = [
+                "INIT: ARCADE_KERNEL_V9.0.1",
+                "LOAD: FONT_MATRIX.DAT [OK]",
+                "LOAD: TONE_JS_AUDIO.BIN [OK]",
+                "LOAD: FIREBASE_PERSISTENCE [PENDING]",
+                "TEST: SELF_DIAGNOSTIC_CHECK [PASS]",
+                "REPORT: CORE_TEMP_NOMINAL [34.5C]",
+                "SYNC: TIME_PROTOCOL_ESTABLISHED",
+                "CHECK: DIRECTORY_MODULES_LOADED [40 ENTRIES]",
+                "STATUS: AWAITING OPERATOR INPUT..."
+            ];
+
+            let lineIndex = 0;
+            const interval = setInterval(() => {
+                if (lineIndex < lines.length) {
+                    output.innerHTML += `<p>> ${lines[lineIndex]}</p>`;
+                    output.scrollTop = output.scrollHeight;
+                    lineIndex++;
+                } else {
+                    clearInterval(interval);
+                    setTimeout(() => {
+                        bootSequenceDiv.classList.add('hidden');
+                        
+                        // CRUCIAL: Initialize Sound after user interaction/load
+                        initSound(); 
+
+                        document.getElementById('auth-area').classList.remove('hidden');
+                        if (authInput) authInput.focus();
+                        
+                        // Show settings button after boot
+                        settingsButton.classList.remove('hidden');
+
+                    }, 500);
+                }
+            }, 300);
+        }
+        
+        // This is a minimal placeholder for the Three.js background
+        function initBackground() {
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer({ canvas: threeBg, alpha: true });
+            
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.position.z = 5;
+
+            // Simple cube animation placeholder
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const material = new THREE.MeshBasicMaterial({ color: 0x8a2be2, wireframe: true });
+            const cube = new THREE.Mesh(geometry, material);
+            scene.add(cube);
+
+            function animate() {
+                requestAnimationFrame(animate);
+                cube.rotation.x += 0.005;
+                cube.rotation.y += 0.005;
+                renderer.render(scene, camera);
+            }
+
+            animate();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+        
+        // Initial setup calls
+        document.addEventListener('DOMContentLoaded', () => {
+            updateClock();
+            setInterval(updateClock, 1000);
+            
+            runBootSequence();
+            initBackground(); // Start the background animation
+        });
+
+    </script>
+</body>
+
+</html>
